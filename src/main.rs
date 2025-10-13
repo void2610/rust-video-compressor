@@ -34,6 +34,10 @@ struct Args {
     /// 解像度の幅を指定（例: 1280）アスペクト比は維持されます
     #[arg(short = 'w', long)]
     width: Option<u32>,
+
+    /// 目標ファイルサイズ（MB単位、例: 10）
+    #[arg(short = 't', long)]
+    target_size: Option<f64>,
 }
 
 fn main() -> Result<()> {
@@ -59,38 +63,133 @@ fn main() -> Result<()> {
 
     println!("入力ファイル: {}", args.input.display());
     println!("出力ファイル: {}", final_output_path.display());
-    println!("品質設定: CRF {}", args.quality);
-    println!("コーデック: {}", args.codec);
-    println!("\n圧縮を開始します...\n");
 
-    // FFmpegコマンドを構築
-    let mut cmd = Command::new("ffmpeg");
-    cmd.arg("-i")
-        .arg(&args.input)
-        .arg("-c:v")
-        .arg(&args.codec)
-        .arg("-crf")
-        .arg(args.quality.to_string())
-        .arg("-preset")
-        .arg(&args.preset)
-        .arg("-c:a")
-        .arg("aac")
-        .arg("-b:a")
-        .arg(&args.audio_bitrate);
+    // 目標サイズモードか通常モードかで処理を分岐
+    let status = if let Some(target_size_mb) = args.target_size {
+        println!("目標サイズ: {} MB", target_size_mb);
+        println!("コーデック: {}", args.codec);
+        println!("\n圧縮を開始します...\n");
 
-    // 解像度の指定がある場合
-    if let Some(width) = args.width {
-        cmd.arg("-vf")
-            .arg(format!("scale={}:-2", width));
-    }
+        // 動画の長さを取得
+        let duration = get_video_duration(&args.input)?;
+        println!("動画の長さ: {:.1}秒", duration);
 
-    cmd.arg("-y") // 出力ファイルを上書き
-        .arg(&temp_output_path);
+        // 音声ビットレートをパース（例: "128k" -> 128.0）
+        let audio_bitrate_kbps: f64 = args.audio_bitrate
+            .trim_end_matches('k')
+            .trim_end_matches('K')
+            .parse()
+            .unwrap_or(128.0);
 
-    // FFmpegを実行
-    let status = cmd
-        .status()
-        .context("FFmpegの実行に失敗しました")?;
+        // 再試行ループ（最大3回）
+        let mut current_target = target_size_mb;
+        let mut attempt = 1;
+        let max_attempts = 3;
+
+        loop {
+            // ビットレートを計算
+            let video_bitrate = calculate_video_bitrate(current_target, duration, audio_bitrate_kbps);
+            println!("\n試行 {}/{}: 目標{}MB, ビデオビットレート={}kbps",
+                    attempt, max_attempts, current_target, video_bitrate);
+
+            // FFmpegコマンドを構築（ビットレートモード）
+            let mut cmd = Command::new("ffmpeg");
+            cmd.arg("-i")
+                .arg(&args.input)
+                .arg("-c:v")
+                .arg(&args.codec)
+                .arg("-b:v")
+                .arg(format!("{}k", video_bitrate))
+                .arg("-maxrate")
+                .arg(format!("{}k", video_bitrate))
+                .arg("-bufsize")
+                .arg(format!("{}k", video_bitrate * 2))
+                .arg("-preset")
+                .arg(&args.preset)
+                .arg("-c:a")
+                .arg("aac")
+                .arg("-b:a")
+                .arg(&args.audio_bitrate);
+
+            // 解像度の指定がある場合
+            if let Some(width) = args.width {
+                cmd.arg("-vf")
+                    .arg(format!("scale={}:-2", width));
+            }
+
+            cmd.arg("-y")
+                .arg(&temp_output_path);
+
+            // FFmpegを実行
+            let status = cmd
+                .status()
+                .context("FFmpegの実行に失敗しました")?;
+
+            if !status.success() {
+                break status;
+            }
+
+            // 出力ファイルのサイズをチェック
+            let output_size_mb = std::fs::metadata(&temp_output_path)
+                .context("出力ファイルの情報取得に失敗しました")?
+                .len() as f64 / 1024.0 / 1024.0;
+
+            println!("結果: {:.2} MB", output_size_mb);
+
+            // 目標サイズ以下なら成功
+            if output_size_mb <= target_size_mb {
+                println!("✓ 目標サイズ内に収まりました！");
+                break status;
+            }
+
+            // 最大試行回数に達したら終了
+            if attempt >= max_attempts {
+                println!("\n⚠ 警告: {}回試行しましたが、目標サイズ({} MB)を超えています({:.2} MB)",
+                        max_attempts, target_size_mb, output_size_mb);
+                break status;
+            }
+
+            // 目標を90%に調整して再試行
+            current_target *= 0.9;
+            attempt += 1;
+            println!("目標サイズを超えたため、再試行します...");
+
+            // 一時ファイルを削除
+            let _ = std::fs::remove_file(&temp_output_path);
+        }
+    } else {
+        println!("品質設定: CRF {}", args.quality);
+        println!("コーデック: {}", args.codec);
+        println!("\n圧縮を開始します...\n");
+
+        // 通常モード（CRFベース）
+        let mut cmd = Command::new("ffmpeg");
+        cmd.arg("-i")
+            .arg(&args.input)
+            .arg("-c:v")
+            .arg(&args.codec)
+            .arg("-crf")
+            .arg(args.quality.to_string())
+            .arg("-preset")
+            .arg(&args.preset)
+            .arg("-c:a")
+            .arg("aac")
+            .arg("-b:a")
+            .arg(&args.audio_bitrate);
+
+        // 解像度の指定がある場合
+        if let Some(width) = args.width {
+            cmd.arg("-vf")
+                .arg(format!("scale={}:-2", width));
+        }
+
+        cmd.arg("-y")
+            .arg(&temp_output_path);
+
+        // FFmpegを実行
+        cmd.status()
+            .context("FFmpegの実行に失敗しました")?
+    };
 
     if status.success() {
         // 元のファイルサイズを取得（削除前に）
@@ -179,4 +278,43 @@ fn check_ffmpeg_installed() -> Result<()> {
         .output()
         .context("FFmpegが見つかりません。FFmpegをインストールしてください。\n\nインストール方法:\n  macOS: brew install ffmpeg\n  Ubuntu/Debian: sudo apt install ffmpeg\n  Windows: https://ffmpeg.org/download.html")?;
     Ok(())
+}
+
+/// ffprobeを使って動画の長さ（秒）を取得
+fn get_video_duration(path: &PathBuf) -> Result<f64> {
+    let output = Command::new("ffprobe")
+        .arg("-v")
+        .arg("error")
+        .arg("-show_entries")
+        .arg("format=duration")
+        .arg("-of")
+        .arg("default=noprint_wrappers=1:nokey=1")
+        .arg(path)
+        .output()
+        .context("ffprobeの実行に失敗しました")?;
+
+    let duration_str = String::from_utf8_lossy(&output.stdout);
+    let duration = duration_str
+        .trim()
+        .parse::<f64>()
+        .context("動画の長さの取得に失敗しました")?;
+
+    Ok(duration)
+}
+
+/// 目標ファイルサイズからビデオビットレート（kbps）を計算
+fn calculate_video_bitrate(target_size_mb: f64, duration_sec: f64, audio_bitrate_kbps: f64) -> u32 {
+    // 目標サイズをビットに変換
+    let target_size_bits = target_size_mb * 8.0 * 1024.0 * 1024.0;
+
+    // 音声分のビットを計算
+    let audio_bits = audio_bitrate_kbps * 1000.0 * duration_sec;
+
+    // ビデオに使えるビット数
+    let video_bits = target_size_bits - audio_bits;
+
+    // ビデオビットレート（kbps）を計算（10%のマージンを持たせる）
+    let video_bitrate_kbps = (video_bits / duration_sec / 1000.0) * 0.9;
+
+    video_bitrate_kbps.max(100.0) as u32
 }
