@@ -2,7 +2,6 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::process::Command;
 use anyhow::{Context, Result};
-use arboard::Clipboard;
 
 /// 動画ファイルの容量を削減するCLIツール
 #[derive(Parser, Debug)]
@@ -10,7 +9,6 @@ use arboard::Clipboard;
 #[command(about = "動画ファイルを圧縮して容量を削減します", long_about = None)]
 struct Args {
     /// 入力動画ファイルのパス
-    #[arg(short, long)]
     input: PathBuf,
 
     /// 出力動画ファイルのパス（省略時は入力ファイルを上書き）
@@ -127,20 +125,33 @@ fn main() -> Result<()> {
             println!("削減率: {:.1}%", reduction);
         }
 
-        // クリップボードにファイルパスをコピー
+        // クリップボードに動画ファイルをコピー（macOS）
         let absolute_path = std::fs::canonicalize(&final_output_path)
             .unwrap_or(final_output_path.clone());
 
-        match Clipboard::new() {
-            Ok(mut clipboard) => {
-                if let Err(e) = clipboard.set_text(absolute_path.display().to_string()) {
-                    eprintln!("\n警告: クリップボードへのコピーに失敗しました: {}", e);
-                } else {
-                    println!("\n📋 ファイルパスをクリップボードにコピーしました");
+        // AppleScriptを使ってファイルをクリップボードにコピー
+        let script = format!(
+            "set the clipboard to (read (POSIX file \"{}\") as «class furl»)",
+            absolute_path.display()
+        );
+
+        let copy_result = Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .output();
+
+        match copy_result {
+            Ok(output) if output.status.success() => {
+                println!("\n📋 動画ファイルをクリップボードにコピーしました");
+            }
+            Ok(output) => {
+                eprintln!("\n警告: クリップボードへのコピーに失敗しました");
+                if !output.stderr.is_empty() {
+                    eprintln!("エラー: {}", String::from_utf8_lossy(&output.stderr));
                 }
             }
             Err(e) => {
-                eprintln!("\n警告: クリップボードの初期化に失敗しました: {}", e);
+                eprintln!("\n警告: クリップボードへのコピーに失敗しました: {}", e);
             }
         }
 
