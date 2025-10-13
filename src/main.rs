@@ -129,16 +129,25 @@ fn main() -> Result<()> {
         let absolute_path = std::fs::canonicalize(&final_output_path)
             .unwrap_or(final_output_path.clone());
 
-        // AppleScriptを使ってファイルをクリップボードにコピー
-        let script = format!(
-            "set the clipboard to (read (POSIX file \"{}\") as «class furl»)",
+        // Swiftを使ってファイルをクリップボードにコピー
+        let swift_code = format!(
+            "import Cocoa; let pb = NSPasteboard.general; pb.clearContents(); pb.writeObjects([NSURL(fileURLWithPath: \"{}\")] as [NSPasteboardWriting])",
             absolute_path.display()
         );
 
-        let copy_result = Command::new("osascript")
-            .arg("-e")
-            .arg(&script)
-            .output();
+        let copy_result = Command::new("swift")
+            .arg("-")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(swift_code.as_bytes());
+                }
+                child.wait_with_output()
+            });
 
         match copy_result {
             Ok(output) if output.status.success() => {
