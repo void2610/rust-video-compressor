@@ -11,7 +11,7 @@ struct Args {
     /// 入力動画ファイルのパス
     input: PathBuf,
 
-    /// 出力動画ファイルのパス（省略時は入力ファイルを上書き）
+    /// 出力動画ファイルのパス（省略時は入力ファイル名_compressed）
     #[arg(short, long)]
     output: Option<PathBuf>,
 
@@ -46,8 +46,17 @@ fn main() -> Result<()> {
     // FFmpegがインストールされているか確認
     check_ffmpeg_installed()?;
 
-    // 出力ファイルパスを決定（デフォルトは入力ファイルと同じ）
-    let final_output_path = args.output.unwrap_or_else(|| args.input.clone());
+    // 出力ファイルパスを決定（デフォルトは{filename}_compressed.{ext}）
+    let final_output_path = args.output.unwrap_or_else(|| {
+        let parent = args.input.parent().unwrap_or(std::path::Path::new("."));
+        let file_stem = args.input.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output");
+        let extension = args.input.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("mp4");
+        parent.join(format!("{}_compressed.{}", file_stem, extension))
+    });
 
     // 一時ファイルパスを生成（拡張子を維持して、ファイル名に_tmpを追加）
     let temp_output_path = {
@@ -192,16 +201,10 @@ fn main() -> Result<()> {
     };
 
     if status.success() {
-        // 元のファイルサイズを取得（削除前に）
+        // 元のファイルサイズを取得
         let input_size_bytes = std::fs::metadata(&args.input)
             .ok()
             .map(|m| m.len());
-
-        // 入力ファイルと出力ファイルが同じ場合、元のファイルを削除
-        if args.input == final_output_path {
-            std::fs::remove_file(&args.input)
-                .context("元のファイルの削除に失敗しました")?;
-        }
 
         // 一時ファイルを最終出力パスにリネーム
         std::fs::rename(&temp_output_path, &final_output_path)
