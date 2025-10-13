@@ -1,8 +1,13 @@
 [package]
-name = "rust-pomodoro"
+name = "rust-video-compressor"
 version = "0.1.0"
 edition = "2021"
+
+[[bin]]
+name = "video-compressor"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 anyhow = "1.0"
+arboard = "3.4"

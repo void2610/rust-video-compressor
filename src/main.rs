@@ -2,6 +2,7 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::process::Command;
 use anyhow::{Context, Result};
+use arboard::Clipboard;
 
 /// 動画ファイルの容量を削減するCLIツール
 #[derive(Parser, Debug)]
@@ -12,7 +13,7 @@ struct Args {
     #[arg(short, long)]
     input: PathBuf,
 
-    /// 出力動画ファイルのパス（省略時は入力ファイル名_compressed）
+    /// 出力動画ファイルのパス（省略時は入力ファイルを上書き）
     #[arg(short, long)]
     output: Option<PathBuf>,
 
@@ -43,26 +44,23 @@ fn main() -> Result<()> {
     // FFmpegがインストールされているか確認
     check_ffmpeg_installed()?;
 
-    // 出力ファイルパスを決定
-    let output_path = match args.output {
-        Some(path) => path,
-        None => {
-            let input_stem = args.input
-                .file_stem()
-                .context("入力ファイル名の取得に失敗しました")?
-                .to_str()
-                .context("ファイル名の変換に失敗しました")?;
-            let input_ext = args.input
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("mp4");
-            let parent = args.input.parent().unwrap_or(std::path::Path::new("."));
-            parent.join(format!("{}_compressed.{}", input_stem, input_ext))
-        }
+    // 出力ファイルパスを決定（デフォルトは入力ファイルと同じ）
+    let final_output_path = args.output.unwrap_or_else(|| args.input.clone());
+
+    // 一時ファイルパスを生成（拡張子を維持して、ファイル名に_tmpを追加）
+    let temp_output_path = {
+        let parent = final_output_path.parent().unwrap_or(std::path::Path::new("."));
+        let file_stem = final_output_path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output");
+        let extension = final_output_path.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("mp4");
+        parent.join(format!("{}_tmp.{}", file_stem, extension))
     };
 
     println!("入力ファイル: {}", args.input.display());
-    println!("出力ファイル: {}", output_path.display());
+    println!("出力ファイル: {}", final_output_path.display());
     println!("品質設定: CRF {}", args.quality);
     println!("コーデック: {}", args.codec);
     println!("\n圧縮を開始します...\n");
@@ -89,7 +87,7 @@ fn main() -> Result<()> {
     }
 
     cmd.arg("-y") // 出力ファイルを上書き
-        .arg(&output_path);
+        .arg(&temp_output_path);
 
     // FFmpegを実行
     let status = cmd
@@ -97,25 +95,59 @@ fn main() -> Result<()> {
         .context("FFmpegの実行に失敗しました")?;
 
     if status.success() {
+        // 元のファイルサイズを取得（削除前に）
+        let input_size_bytes = std::fs::metadata(&args.input)
+            .ok()
+            .map(|m| m.len());
+
+        // 入力ファイルと出力ファイルが同じ場合、元のファイルを削除
+        if args.input == final_output_path {
+            std::fs::remove_file(&args.input)
+                .context("元のファイルの削除に失敗しました")?;
+        }
+
+        // 一時ファイルを最終出力パスにリネーム
+        std::fs::rename(&temp_output_path, &final_output_path)
+            .context("ファイルのリネームに失敗しました")?;
+
         println!("\n✓ 圧縮が完了しました！");
-        println!("出力ファイル: {}", output_path.display());
+        println!("出力ファイル: {}", final_output_path.display());
 
         // ファイルサイズの比較
-        if let (Ok(input_meta), Ok(output_meta)) = (
-            std::fs::metadata(&args.input),
-            std::fs::metadata(&output_path)
+        if let (Some(input_size), Ok(output_meta)) = (
+            input_size_bytes,
+            std::fs::metadata(&final_output_path)
         ) {
-            let input_size = input_meta.len() as f64 / 1024.0 / 1024.0;
-            let output_size = output_meta.len() as f64 / 1024.0 / 1024.0;
-            let reduction = ((input_size - output_size) / input_size) * 100.0;
+            let input_size_mb = input_size as f64 / 1024.0 / 1024.0;
+            let output_size_mb = output_meta.len() as f64 / 1024.0 / 1024.0;
+            let reduction = ((input_size_mb - output_size_mb) / input_size_mb) * 100.0;
 
-            println!("\n元のサイズ: {:.2} MB", input_size);
-            println!("圧縮後: {:.2} MB", output_size);
+            println!("\n元のサイズ: {:.2} MB", input_size_mb);
+            println!("圧縮後: {:.2} MB", output_size_mb);
             println!("削減率: {:.1}%", reduction);
+        }
+
+        // クリップボードにファイルパスをコピー
+        let absolute_path = std::fs::canonicalize(&final_output_path)
+            .unwrap_or(final_output_path.clone());
+
+        match Clipboard::new() {
+            Ok(mut clipboard) => {
+                if let Err(e) = clipboard.set_text(absolute_path.display().to_string()) {
+                    eprintln!("\n警告: クリップボードへのコピーに失敗しました: {}", e);
+                } else {
+                    println!("\n📋 ファイルパスをクリップボードにコピーしました");
+                }
+            }
+            Err(e) => {
+                eprintln!("\n警告: クリップボードの初期化に失敗しました: {}", e);
+            }
         }
 
         Ok(())
     } else {
+        // FFmpegが失敗した場合、一時ファイルをクリーンアップ
+        let _ = std::fs::remove_file(&temp_output_path);
         anyhow::bail!("FFmpegによる圧縮に失敗しました")
     }
 }
