@@ -1,1 +1,8 @@
 /target
+
+# 動画ファイル
+*.mov
+*.mp4
+*.avi
+*.mkv
+*.webm
