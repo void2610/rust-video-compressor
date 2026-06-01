@@ -1,5 +1,5 @@
 use clap::Parser;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use anyhow::{Context, Result};
 
@@ -227,42 +227,13 @@ fn main() -> Result<()> {
             println!("削減率: {:.1}%", reduction);
         }
 
-        // クリップボードに動画ファイルをコピー（macOS）
-        let absolute_path = std::fs::canonicalize(&final_output_path)
-            .unwrap_or(final_output_path.clone());
-
-        // Swiftを使ってファイルをクリップボードにコピー
-        let swift_code = format!(
-            "import Cocoa; let pb = NSPasteboard.general; pb.clearContents(); pb.writeObjects([NSURL(fileURLWithPath: \"{}\")] as [NSPasteboardWriting])",
-            absolute_path.display()
-        );
-
-        let copy_result = Command::new("swift")
-            .arg("-")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .and_then(|mut child| {
-                use std::io::Write;
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(swift_code.as_bytes());
-                }
-                child.wait_with_output()
-            });
-
-        match copy_result {
-            Ok(output) if output.status.success() => {
+        match copy_file_to_clipboard(&final_output_path) {
+            Ok(()) => {
                 println!("\n📋 動画ファイルをクリップボードにコピーしました");
             }
-            Ok(output) => {
-                eprintln!("\n警告: クリップボードへのコピーに失敗しました");
-                if !output.stderr.is_empty() {
-                    eprintln!("エラー: {}", String::from_utf8_lossy(&output.stderr));
-                }
-            }
             Err(e) => {
-                eprintln!("\n警告: クリップボードへのコピーに失敗しました: {}", e);
+                eprintln!("\n警告: クリップボードへのコピーに失敗しました");
+                eprintln!("エラー: {}", e);
             }
         }
 
@@ -320,4 +291,46 @@ fn calculate_video_bitrate(target_size_mb: f64, duration_sec: f64, audio_bitrate
     let video_bitrate_kbps = (video_bits / duration_sec / 1000.0) * 0.9;
 
     video_bitrate_kbps.max(100.0) as u32
+}
+
+fn copy_file_to_clipboard(path: &Path) -> Result<()> {
+    let absolute_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let swift_code = r#"
+import AppKit
+import Foundation
+
+let filePath = CommandLine.arguments[1]
+let fileURL = URL(fileURLWithPath: filePath)
+let pasteboard = NSPasteboard.general
+
+pasteboard.clearContents()
+
+guard pasteboard.writeObjects([fileURL as NSURL]) else {
+    fputs("NSPasteboard.writeObjects returned false\n", stderr)
+    exit(1)
+}
+"#;
+
+    let output = Command::new("swift")
+        .arg("-")
+        .arg(absolute_path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(swift_code.as_bytes())?;
+            }
+            child.wait_with_output()
+        })
+        .context("Swiftによるクリップボード操作の起動に失敗しました")?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("{}", stderr.trim());
+    }
 }
